@@ -22,6 +22,45 @@ function dominioDe(url) {
   try { return new URL(url).hostname; } catch { return ""; }
 }
 
+//Plan B, simulacion de veredicto y borrado
+const SOLO_DOMINIO_PRUEBA = ["localhost"];
+function veredictoSimulado(nombre) {
+  return nombre.toLowerCase().includes("peligroso") ? "peligroso" : "limpio";
+}
+
+function contextoDe(url, d) {
+  const nombre = nombreBase(d.filename) || nombreBase(new URL(url).pathname);
+  return { filename: nombre, extension: extensionDe(nombre), mime: d.mime, source_domain: dominioDe(url) };
+}
+
+async function aplicarVeredicto(id, veredicto, ctx) {
+  log(id, "veredicto simulado", { veredicto });
+  if (veredicto !== "peligroso") return;
+  if (!SOLO_DOMINIO_PRUEBA.includes(ctx.source_domain)) {
+    log(id, "PELIGROSO, pero el dominio no está en la lista de prueba: NO se borra", { dominio: ctx.source_domain });
+    return;
+  }
+  const antes = await estado(id);
+  try {
+    if (antes && antes.state === "in_progress") {
+      await chrome.downloads.cancel(id);
+      log(id, "cancel OK (descarga en curso descartada)");
+    } else if (antes && antes.state === "complete") {
+      await chrome.downloads.removeFile(id);
+      log(id, "removeFile OK");
+    } else {
+      log(id, "estado no esperado, no se borró", antes);
+    }
+  } catch (e) {
+    log(id, "NO SE PUDO BORRAR", { mensaje: e.message });
+  }
+  log(id, "estado tras el borrado", await estado(id));
+}
+
+
+// constantes para el plan B
+
+
 async function estado(id) {
   const [d] = await chrome.downloads.search({ id });
   if (!d) return null;
@@ -106,6 +145,8 @@ chrome.downloads.onCreated.addListener(async (item) => {
     log(id, "MODO DEGRADADO: la pausa llegó tarde. Se espera a que termine");
     await Promise.race([d.terminada, esperar(ESPERA_FIN_MS)]);
     log(id, "En la versión real aquí se escanearía el archivo ya descargado");
+    const ctx = contextoDe(item.url, d);
+    await aplicarVeredicto(id, veredictoSimulado(ctx.filename), ctx);
     return;
   }
 
@@ -133,9 +174,13 @@ chrome.downloads.onCreated.addListener(async (item) => {
     // La pausa no retuvo la descarga (por ejemplo, salió del caché): se trata como modo degradado
     log(id, "LA PAUSA NO RETUVO: la descarga terminó mientras se 'escaneaba'. Se trata como modo degradado");
     log(id, "En la versión real aquí se escanearía el archivo ya descargado");
+    const ctx = contextoDe(item.url, d);
+    await aplicarVeredicto(id, veredictoSimulado(ctx.filename), ctx);
     return;
   }
-
+  const veredicto = veredictoSimulado(contexto.filename);
+  await aplicarVeredicto(id, veredicto, contexto);
+  if (veredicto === "peligroso") return; // no se reanuda
   const e2 = await estado(id);
   log(id, "estado antes de reanudar", e2);
   try {
