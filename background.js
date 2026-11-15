@@ -7,8 +7,11 @@ const descargas = new Map();
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
 const API_URL = "http://127.0.0.1:8000"
 const SOLO_DOMINIO_PRUEBA = ["localhost", "127.0.0.1"];
-
-
+const BOTONES = {
+  sospechoso: ["aceptar", "eliminar"],
+  error: ["aceptar", "eliminar"],
+  peligroso: ["entendido"],
+};
 
 function log(id, mensaje, datos) {
   const d = descargas.get(id);
@@ -33,30 +36,79 @@ function contextoDe(url, d) {
   return { filename: nombre, extension: extensionDe(nombre), mime: d.mime, source_domain: dominioDe(url) };
 }
 
-async function aplicarVeredicto(id, veredicto, ctx) {
-  log(id, "veredicto ", { veredicto });
-  if (veredicto !== "peligroso") return;
+async function borrarPeligroso(id, ctx) {
   if (!SOLO_DOMINIO_PRUEBA.includes(ctx.source_domain)) {
     log(id, "PELIGROSO, pero el dominio no está en la lista de prueba: NO se borra", { dominio: ctx.source_domain });
-    return;
+    return false;
   }
   const antes = await estado(id);
   try {
     if (antes && antes.state === "in_progress") {
       await chrome.downloads.cancel(id);
       log(id, "cancel OK (descarga en curso descartada)");
-    } else if (antes && antes.state === "complete") {
+      return true;
+    }
+    if (antes && antes.state === "complete") {
       await chrome.downloads.removeFile(id);
       log(id, "removeFile OK");
-    } else {
-      log(id, "estado no esperado, no se borró", antes);
+      return true;
     }
+    log(id, "estado no esperado, no se borró", antes);
   } catch (e) {
     log(id, "NO SE PUDO BORRAR", { mensaje: e.message });
   }
-  log(id, "estado tras el borrado", await estado(id));
+  return false;
 }
 
+async function aplicarVeredicto(id, r, ctx) {
+  log(id, "veredicto", { veredicto: r.verdict });
+  if (r.verdict === "peligroso") {
+    if (await borrarPeligroso(id, ctx)) await mostrarAviso(id, r, ctx);
+  } else if (r.verdict === "sospechoso" || r.verdict === "error") {
+    await mostrarAviso(id, r, ctx);
+  }
+}
+
+async function mostrarAviso(id, r, ctx) {
+  const pendiente = {
+    id,
+    verdict: r.verdict,
+    matches: r.matches || [],
+    filename: ctx.filename,
+    botones: BOTONES[r.verdict],
+  };
+  await chrome.storage.session.set({ [`pend:${id}`]: pendiente });
+  const ventana = await chrome.windows.create({
+    url: chrome.runtime.getURL(`aviso.html?id=${id}`),
+    type: "popup",
+    width: 480,
+    height: 600,
+  });
+  await chrome.storage.session.set({ [`pend:${id}`]: { ...pendiente, windowId: ventana.id } });
+}
+
+// acciones
+async function aplicarDecision(id, accion) {
+  const clave = `pend:${id}`;
+  const { [clave]: pend } = await chrome.storage.session.get(clave);
+  if (!pend) return;
+  await chrome.storage.session.remove(clave);
+  if (pend.windowId) chrome.windows.remove(pend.windowId).catch(() => {});
+  log(id, "decisión del usuario", { accion });
+
+  const e = await estado(id);
+  if (!e) return;
+  try {
+    if (accion === "aceptar") {
+      if (e.paused) await chrome.downloads.resume(id);
+    } else if (accion === "eliminar" || (accion === "cerrar" && e.paused)) {
+      if (e.state === "complete") await chrome.downloads.removeFile(id);
+      else await chrome.downloads.cancel(id);
+    }
+  } catch (err) {
+    log(id, "no se pudo aplicar la decisión", { mensaje: err.message });
+  }
+}
 async function sha256Hex(buffer) {
   const hash = await crypto.subtle.digest("SHA-256", buffer);
   return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -109,7 +161,7 @@ async function conPulso(promesa) {
 async function escanearYAplicar(id, url, ctx) {
   const r = await conPulso(escanear(id, url, ctx));
   log(id, "respuesta de la API", r);
-  await aplicarVeredicto(id, r.verdict, ctx);
+  await aplicarVeredicto(id, r, ctx);
 }
 
 
@@ -192,7 +244,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
   if (!pausada || llegoTarde) {
     d.modo = "degradado";
     log(id, "MODO DEGRADADO: la pausa llegó tarde. Se espera a que termine");
-    await Promise.race([d.terminada, esperar(ESPERA_FIN_MS)]);
+    await Promise.race([d.nombreListo, esperar(ESPERA_NOMBRE_MS)]);
     await escanearYAplicar(id, item.url, contextoDe(item.url, d));
     return;
   }
@@ -228,8 +280,8 @@ chrome.downloads.onCreated.addListener(async (item) => {
   }
   log(id, "respuesta de la API", resultado);
   const veredicto = resultado.verdict;
-  await aplicarVeredicto(id, veredicto, contexto);
-  if (veredicto === "peligroso") return; // no se reanuda
+  await aplicarVeredicto(id, resultado, contexto);
+  if (["peligroso", "sospechoso", "error"].includes(veredicto)) return; // espera la decisión o no se reanuda
   const e2 = await estado(id);
   log(id, "estado antes de reanudar", e2);
   try {
@@ -268,5 +320,17 @@ chrome.downloads.onChanged.addListener((delta) => {
       error: delta.error ? delta.error.current : null,
       duracion_ms: Date.now() - d.inicio,
     });
+  }
+});
+
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg && msg.tipo === "decision") aplicarDecision(msg.id, msg.accion);
+});
+
+chrome.windows.onRemoved.addListener(async (windowId) => {
+  const todo = await chrome.storage.session.get(null);
+  for (const [clave, pend] of Object.entries(todo)) {
+    if (clave.startsWith("pend:") && pend.windowId === windowId) aplicarDecision(pend.id, "cerrar");
   }
 });
