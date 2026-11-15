@@ -1,10 +1,14 @@
-const ESPERA_MS = 5000;          // simula el escaneo. Para la prueba de pausa larga usa 35000
+
 const MAX_BYTES = 25 * 1024 * 1024; // tamaño máximo a escanear (25 MB)
 const ESPERA_NOMBRE_MS = 500;    // tiempo máximo para esperar el filename final
 const ESPERA_FIN_MS = 30000;     // tiempo máximo para esperar que termine una descarga tardía
 
 const descargas = new Map();
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
+const API_URL = "http://127.0.0.1:8000"
+const SOLO_DOMINIO_PRUEBA = ["localhost", "127.0.0.1"];
+
+
 
 function log(id, mensaje, datos) {
   const d = descargas.get(id);
@@ -22,11 +26,7 @@ function dominioDe(url) {
   try { return new URL(url).hostname; } catch { return ""; }
 }
 
-//Plan B, simulacion de veredicto y borrado
-const SOLO_DOMINIO_PRUEBA = ["localhost"];
-function veredictoSimulado(nombre) {
-  return nombre.toLowerCase().includes("peligroso") ? "peligroso" : "limpio";
-}
+
 
 function contextoDe(url, d) {
   const nombre = nombreBase(d.filename) || nombreBase(new URL(url).pathname);
@@ -34,7 +34,7 @@ function contextoDe(url, d) {
 }
 
 async function aplicarVeredicto(id, veredicto, ctx) {
-  log(id, "veredicto simulado", { veredicto });
+  log(id, "veredicto ", { veredicto });
   if (veredicto !== "peligroso") return;
   if (!SOLO_DOMINIO_PRUEBA.includes(ctx.source_domain)) {
     log(id, "PELIGROSO, pero el dominio no está en la lista de prueba: NO se borra", { dominio: ctx.source_domain });
@@ -57,6 +57,61 @@ async function aplicarVeredicto(id, veredicto, ctx) {
   log(id, "estado tras el borrado", await estado(id));
 }
 
+async function sha256Hex(buffer) {
+  const hash = await crypto.subtle.digest("SHA-256", buffer);
+  return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+
+async function escanearConApi(url, ctx) {
+  const resp = await fetch(url, { credentials: "include" });
+  if (!resp.ok) throw new Error(`fetch ${resp.status}`);
+  if (Number(resp.headers.get("content-length")) > MAX_BYTES) return { verdict: "excede_tamano" };
+  const buffer = await resp.arrayBuffer();
+  if (buffer.byteLength > MAX_BYTES) return { verdict: "excede_tamano" };
+
+  const form = new FormData();
+  form.append("file", new Blob([buffer]), ctx.filename);
+  form.append("sha256", await sha256Hex(buffer));
+  form.append("filename", ctx.filename);
+  form.append("extension", ctx.extension);
+  form.append("mime", ctx.mime || "");
+  form.append("source_domain", ctx.source_domain);
+
+  const r = await fetch(`${API_URL}/scan`, { method: "POST", body: form });
+  if (!r.ok) throw new Error(`API ${r.status}`);
+  return r.json();
+}
+
+//reintento en casi de falle una vez el escaneo
+async function escanear(id, url, ctx) {
+  for (let intento = 1; intento <= 2; intento++){
+    try {
+      return await escanearConApi(url, ctx);
+    } catch (e) {
+      log(id, `escaneo fallo(intento ${intento})`, {mensaje: e.message});
+    }
+  }
+  return { veredict: "error" };
+}
+
+
+async function conPulso(promesa) {
+  const pulso = setInterval(() => chrome.runtime.getPlatformInfo(), 20000);
+  try {
+    return await promesa;
+  } finally{
+   clearInterval(pulso);
+
+  }
+}
+
+async function escanearYAplicar(id, url, ctx) {
+  const r = await conPulso(escanear(id, url, ctx));
+  log(id, "respuesta de la API", r);
+  await aplicarVeredicto(id, r.verdict, ctx);
+}
+
 
 // constantes para el plan B
 
@@ -74,12 +129,6 @@ async function estado(id) {
   };
 }
 
-// Mantiene vivo el service worker de MV3 durante esperas largas (se apaga tras ~30 s sin actividad)
-async function esperarVivo(ms) {
-  const pulso = setInterval(() => chrome.runtime.getPlatformInfo(), 20000);
-  await esperar(ms);
-  clearInterval(pulso);
-}
 
 chrome.downloads.onCreated.addListener(async (item) => {
   const id = item.id;
@@ -144,9 +193,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
     d.modo = "degradado";
     log(id, "MODO DEGRADADO: la pausa llegó tarde. Se espera a que termine");
     await Promise.race([d.terminada, esperar(ESPERA_FIN_MS)]);
-    log(id, "En la versión real aquí se escanearía el archivo ya descargado");
-    const ctx = contextoDe(item.url, d);
-    await aplicarVeredicto(id, veredictoSimulado(ctx.filename), ctx);
+    await escanearYAplicar(id, item.url, contextoDe(item.url, d));
     return;
   }
 
@@ -162,23 +209,25 @@ chrome.downloads.onCreated.addListener(async (item) => {
   };
   log(id, "contexto que se mandaría a la API", contexto);
 
-  // Simula el escaneo (en la versión real: fetch + hash + API)
-  log(id, `simulando escaneo (${ESPERA_MS} ms)`);
+
+  let resultado = null;
   d.reteniendo = true;
   const terminoAntes = await Promise.race([
-    esperarVivo(ESPERA_MS).then(() => false),
-    d.terminada.then(() => true),
+      conPulso(escanear(id, item.url, contexto)).then((r) => {
+        resultado = r;
+        return false;
+      }),
+      d.terminada.then(() => true),
   ]);
   d.reteniendo = false;
+
   if (terminoAntes) {
     // La pausa no retuvo la descarga (por ejemplo, salió del caché): se trata como modo degradado
-    log(id, "LA PAUSA NO RETUVO: la descarga terminó mientras se 'escaneaba'. Se trata como modo degradado");
-    log(id, "En la versión real aquí se escanearía el archivo ya descargado");
-    const ctx = contextoDe(item.url, d);
-    await aplicarVeredicto(id, veredictoSimulado(ctx.filename), ctx);
+    await escanearYAplicar(id, item.url, contextoDe(item.url, d));
     return;
   }
-  const veredicto = veredictoSimulado(contexto.filename);
+  log(id, "respuesta de la API", resultado);
+  const veredicto = resultado.verdict;
   await aplicarVeredicto(id, veredicto, contexto);
   if (veredicto === "peligroso") return; // no se reanuda
   const e2 = await estado(id);
