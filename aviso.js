@@ -14,6 +14,10 @@ const TEXTOS = {
     titulo: "No se pudo escanear",
     resumen: "No fue posible analizar este archivo, ni después de un reintento. No sabemos si es seguro.",
   },
+  excede_tamano: {
+    titulo: "Archivo demasiado grande para escanear",
+    resumen: "Este archivo supera el límite de 25 MB, así que no se analizó. No sabemos si es seguro.",
+  },
 };
 const ETIQUETAS = { aceptar: "Aceptar", eliminar: "Eliminar", entendido: "Entendido" };
 

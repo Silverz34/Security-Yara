@@ -12,6 +12,7 @@ const BOTONES = {
   sospechoso: ["aceptar", "eliminar"],
   error: ["aceptar", "eliminar"],
   peligroso: ["entendido"],
+    excede_tamano: ["aceptar", "eliminar"]
 };
 
 function log(id, mensaje, datos) {
@@ -61,7 +62,7 @@ async function aplicarVeredicto(id, r, ctx) {
   log(id, "veredicto", { veredicto: r.verdict });
   if (r.verdict === "peligroso") {
     if (await borrarPeligroso(id, ctx)) await mostrarAviso(id, r, ctx);
-  } else if (r.verdict === "sospechoso" || r.verdict === "error") {
+  } else if (["sospechoso", "error", "excede_tamano"].includes(r.verdict)) {
     await mostrarAviso(id, r, ctx);
   }
 }
@@ -141,7 +142,7 @@ async function escanear(id, url, ctx) {
       log(id, `escaneo fallo(intento ${intento})`, {mensaje: e.message});
     }
   }
-  return { veredict: "error" };
+  return { verdict: "error" };
 }
 
 
@@ -214,10 +215,12 @@ chrome.downloads.onCreated.addListener(async (item) => {
   // el tamaño ya se conoce en onCreated -> si excede el máximo, ni se pausa
   if (item.totalBytes > MAX_BYTES) {
     d.modo = "excede_tamano";
-    log(id, "EXCEDE EL MÁXIMO: no se pausa; en la versión real se avisaría al usuario", {
+    log(id, "EXCEDE EL MÁXIMO: no se pausa ni se escanea", {
       totalBytes: item.totalBytes,
       maxBytes: MAX_BYTES,
     });
+    const filename = nombreBase(d.filename) || nombreBase(new URL(item.url).pathname);
+    await mostrarAviso(id, { verdict: "excede_tamano", matches: [] }, { filename });
     return;
   }
 
@@ -278,7 +281,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
   log(id, "respuesta de la API", resultado);
   const veredicto = resultado.verdict;
   await aplicarVeredicto(id, resultado, contexto);
-  if (["peligroso", "sospechoso", "error"].includes(veredicto)) return; // espera la decisión o no se reanuda
+  if (["peligroso", "sospechoso", "error", "excede_tamano"].includes(veredicto)) return;
   const e2 = await estado(id);
   log(id, "estado antes de reanudar", e2);
   try {
