@@ -18,6 +18,10 @@ const TEXTOS = {
     titulo: "Archivo demasiado grande para escanear",
     resumen: "Este archivo supera el límite de 25 MB, así que no se analizó. No sabemos si es seguro.",
   },
+  no_escaneable: {
+    titulo: "Este tipo de descarga no se puede escanear",
+    resumen: "Este archivo se generó dentro de la propia página (dirección blob: o data:) y SecureYara no puede volver a pedirlo para analizarlo. No sabemos si es seguro.",
+  },
 };
 const ETIQUETAS = { aceptar: "Aceptar", eliminar: "Eliminar", entendido: "Entendido" };
 

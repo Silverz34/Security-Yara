@@ -2,6 +2,7 @@
 const MAX_BYTES = 25 * 1024 * 1024; // tamaño máximo a escanear (25 MB)
 const ESPERA_NOMBRE_MS = 500;    // tiempo máximo para esperar el filename final
 const ESPERA_FIN_MS = 30000;     // tiempo máximo para esperar que termine una descarga tardía
+const TIMEOUT_DESCARGA_MS = 60000;
 const TIMEOUT_MS = 20000;
 
 const descargas = new Map();
@@ -12,7 +13,8 @@ const BOTONES = {
   sospechoso: ["aceptar", "eliminar"],
   error: ["aceptar", "eliminar"],
   peligroso: ["entendido"],
-    excede_tamano: ["aceptar", "eliminar"]
+  excede_tamano: ["aceptar", "eliminar"],
+  no_escaneable: ["aceptar", "eliminar"]
 };
 
 function log(id, mensaje, datos) {
@@ -114,7 +116,7 @@ async function sha256Hex(buffer) {
 
 
 async function escanearConApi(url, ctx) {
-  const resp = await fetch(url, { credentials: "include", signal: AbortSignal.timeout(TIMEOUT_MS) });
+  const resp = await fetch(url, { credentials: "include", signal: AbortSignal.timeout(TIMEOUT_DESCARGA_MS) });
   if (!resp.ok) throw new Error(`fetch ${resp.status}`);
   if (Number(resp.headers.get("content-length")) > MAX_BYTES) return { verdict: "excede_tamano" };
   const buffer = await resp.arrayBuffer();
@@ -209,6 +211,8 @@ chrome.downloads.onCreated.addListener(async (item) => {
   if (/^(blob|data):/i.test(item.url)) {
     d.modo = "no_escaneable_blob_data";
     log(id, "NO ESCANEABLE: URL blob:/data:. No se pausa; la descarga sigue normal");
+    await Promise.race([d.nombreListo, esperar(ESPERA_NOMBRE_MS)]);
+    await mostrarAviso(id, { verdict: "no_escaneable", matches: [] }, { filename: nombreBase(d.filename) || "archivo" });
     return;
   }
 
