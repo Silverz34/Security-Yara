@@ -2,11 +2,12 @@
 const MAX_BYTES = 25 * 1024 * 1024; // tamaño máximo a escanear (25 MB)
 const ESPERA_NOMBRE_MS = 500;    // tiempo máximo para esperar el filename final
 const ESPERA_FIN_MS = 30000;     // tiempo máximo para esperar que termine una descarga tardía
+const TIMEOUT_MS = 20000;
 
 const descargas = new Map();
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
 const API_URL = "http://127.0.0.1:8000"
-const SOLO_DOMINIO_PRUEBA = ["localhost", "127.0.0.1"];
+
 const BOTONES = {
   sospechoso: ["aceptar", "eliminar"],
   error: ["aceptar", "eliminar"],
@@ -37,10 +38,6 @@ function contextoDe(url, d) {
 }
 
 async function borrarPeligroso(id, ctx) {
-  if (!SOLO_DOMINIO_PRUEBA.includes(ctx.source_domain)) {
-    log(id, "PELIGROSO, pero el dominio no está en la lista de prueba: NO se borra", { dominio: ctx.source_domain });
-    return false;
-  }
   const antes = await estado(id);
   try {
     if (antes && antes.state === "in_progress") {
@@ -116,7 +113,7 @@ async function sha256Hex(buffer) {
 
 
 async function escanearConApi(url, ctx) {
-  const resp = await fetch(url, { credentials: "include" });
+  const resp = await fetch(url, { credentials: "include", signal: AbortSignal.timeout(TIMEOUT_MS) });
   if (!resp.ok) throw new Error(`fetch ${resp.status}`);
   if (Number(resp.headers.get("content-length")) > MAX_BYTES) return { verdict: "excede_tamano" };
   const buffer = await resp.arrayBuffer();
@@ -130,7 +127,7 @@ async function escanearConApi(url, ctx) {
   form.append("mime", ctx.mime || "");
   form.append("source_domain", ctx.source_domain);
 
-  const r = await fetch(`${API_URL}/scan`, { method: "POST", body: form });
+  const r = await fetch(`${API_URL}/scan`, { method: "POST", body: form, signal: AbortSignal.timeout(TIMEOUT_MS)});
   if (!r.ok) throw new Error(`API ${r.status}`);
   return r.json();
 }
