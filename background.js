@@ -36,8 +36,12 @@ function dominioDe(url) {
 
 
 function contextoDe(url, d) {
-  const nombre = nombreBase(d.filename) || nombreBase(new URL(url).pathname);
-  return { filename: nombre, extension: extensionDe(nombre), mime: d.mime, source_domain: dominioDe(url) };
+  let nombreUrl = "";
+  try {
+    nombreUrl = nombreBase(new URL(url).pathname);
+  } catch { }
+  const nombre = (nombreBase(d.filename) || nombreUrl || "archivo").slice(0, 120);
+  return { filename: nombre, extension: extensionDe(nombre), mime: d.mime, source_domain: dominioDe(url), scan_mode: "degradado" };
 }
 
 async function borrarPeligroso(id, ctx) {
@@ -70,6 +74,9 @@ async function aplicarVeredicto(id, r, ctx) {
 }
 
 async function mostrarAviso(id, r, ctx) {
+  const clave = `pend:${id}`;
+  const existente = await chrome.store.session.get(clave)
+  if (existente[clave]) return;
   const pendiente = {
     id,
     verdict: r.verdict,
@@ -77,14 +84,14 @@ async function mostrarAviso(id, r, ctx) {
     filename: ctx.filename,
     botones: BOTONES[r.verdict],
   };
-  await chrome.storage.session.set({ [`pend:${id}`]: pendiente });
+  await chrome.storage.session.set({ [clave]: pendiente });
   const ventana = await chrome.windows.create({
     url: chrome.runtime.getURL(`aviso.html?id=${id}`),
     type: "popup",
     width: 480,
     height: 600,
   });
-  await chrome.storage.session.set({ [`pend:${id}`]: { ...pendiente, windowId: ventana.id } });
+  await chrome.storage.session.set({ [clave]: { ...pendiente, windowId: ventana.id } });
 }
 
 // acciones
@@ -129,6 +136,7 @@ async function escanearConApi(url, ctx) {
   form.append("extension", ctx.extension);
   form.append("mime", ctx.mime || "");
   form.append("source_domain", ctx.source_domain);
+  form.append("scan_mode", ctx.scan_mode || "principal");
 
   const r = await fetch(`${API_URL}/scan`, { method: "POST", body: form, signal: AbortSignal.timeout(TIMEOUT_MS)});
   if (!r.ok) throw new Error(`API ${r.status}`);
@@ -183,6 +191,18 @@ async function estado(id) {
 
 
 chrome.downloads.onCreated.addListener(async (item) => {
+  const url = item.finalUrl || item.url || "";
+  if (!/^https?:\/\//i.test(url)) {
+    await Promise.race([d.nombreListo, esperar(ESPERA_NOMBRE_MS)]);
+    await mostrarAviso(id, { verdict: "no_escaneable", matches: [] }, { filename: nombreBase(d.filename) || "archivo" });
+    return;
+  }
+  if (item.byExtensionId) {
+    return;
+  }
+  if (item.startTime && Date.now() - new Date(item.startTime).getTime() > 15000) {
+    return;
+  }
   const id = item.id;
   const d = {
     inicio: Date.now(),
@@ -207,14 +227,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
     totalBytes: item.totalBytes,
   });
 
-  // blob: y data: no se pueden volver a pedir con fetch -> no escaneables
-  if (/^(blob|data):/i.test(item.url)) {
-    d.modo = "no_escaneable_blob_data";
-    log(id, "NO ESCANEABLE: URL blob:/data:. No se pausa; la descarga sigue normal");
-    await Promise.race([d.nombreListo, esperar(ESPERA_NOMBRE_MS)]);
-    await mostrarAviso(id, { verdict: "no_escaneable", matches: [] }, { filename: nombreBase(d.filename) || "archivo" });
-    return;
-  }
+
 
   // el tamaño ya se conoce en onCreated -> si excede el máximo, ni se pausa
   if (item.totalBytes > MAX_BYTES) {
@@ -262,6 +275,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
     mime: d.mime,
     source_domain: dominioDe(item.url),
     fuente_nombre: d.filename ? "chrome" : "url",
+    scan_mode : "principal"
   };
   log(id, "contexto que se mandaría a la API", contexto);
 
