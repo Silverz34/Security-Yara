@@ -1,20 +1,18 @@
-
 const MAX_BYTES = 25 * 1024 * 1024; // tamaño máximo a escanear (25 MB)
-const ESPERA_NOMBRE_MS = 500;    // tiempo máximo para esperar el filename final
-const ESPERA_FIN_MS = 30000;     // tiempo máximo para esperar que termine una descarga tardía
-const TIMEOUT_DESCARGA_MS = 60000;
-const TIMEOUT_MS = 20000;
+const ESPERA_NOMBRE_MS = 500;       // tiempo máximo para esperar el filename final
+const TIMEOUT_DESCARGA_MS = 60000;  // tiempo máximo para pedir el archivo a su sitio de origen
+const TIMEOUT_API_MS = 20000;       // tiempo máximo de cada llamada a la API
+const API_URL = "http://127.0.0.1:8000";
 
 const descargas = new Map();
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
-const API_URL = "http://127.0.0.1:8000"
 
 const BOTONES = {
   sospechoso: ["aceptar", "eliminar"],
   error: ["aceptar", "eliminar"],
-  peligroso: ["entendido"],
   excede_tamano: ["aceptar", "eliminar"],
-  no_escaneable: ["aceptar", "eliminar"]
+  no_escaneable: ["aceptar", "eliminar"],
+  peligroso: ["entendido"],
 };
 
 function log(id, mensaje, datos) {
@@ -22,6 +20,7 @@ function log(id, mensaje, datos) {
   const ms = d ? Date.now() - d.inicio : 0;
   console.log(`[#${id} +${ms}ms] ${mensaje}` + (datos ? " " + JSON.stringify(datos) : ""));
 }
+
 const nombreBase = (ruta) => (ruta || "").split(/[\\/]/).pop();
 
 function extensionDe(nombre) {
@@ -33,8 +32,6 @@ function dominioDe(url) {
   try { return new URL(url).hostname; } catch { return ""; }
 }
 
-
-
 function contextoDe(url, d) {
   let nombreUrl = "";
   try {
@@ -42,6 +39,19 @@ function contextoDe(url, d) {
   } catch { }
   const nombre = (nombreBase(d.filename) || nombreUrl || "archivo").slice(0, 120);
   return { filename: nombre, extension: extensionDe(nombre), mime: d.mime, source_domain: dominioDe(url), scan_mode: "degradado" };
+}
+
+async function estado(id) {
+  const [d] = await chrome.downloads.search({ id });
+  if (!d) return null;
+  return {
+    state: d.state,
+    paused: d.paused,
+    bytesReceived: d.bytesReceived,
+    totalBytes: d.totalBytes,
+    canResume: d.canResume,
+    error: d.error,
+  };
 }
 
 async function borrarPeligroso(id, ctx) {
@@ -75,7 +85,7 @@ async function aplicarVeredicto(id, r, ctx) {
 
 async function mostrarAviso(id, r, ctx) {
   const clave = `pend:${id}`;
-  const existente = await chrome.store.session.get(clave)
+  const existente = await chrome.storage.session.get(clave);
   if (existente[clave]) return;
   const pendiente = {
     id,
@@ -94,7 +104,7 @@ async function mostrarAviso(id, r, ctx) {
   await chrome.storage.session.set({ [clave]: { ...pendiente, windowId: ventana.id } });
 }
 
-// acciones
+// accion: "aceptar" | "eliminar" | "entendido" | "cerrar" (cerrar la ventana con la X)
 async function aplicarDecision(id, accion) {
   const clave = `pend:${id}`;
   const { [clave]: pend } = await chrome.storage.session.get(clave);
@@ -107,8 +117,8 @@ async function aplicarDecision(id, accion) {
   if (!e) return;
   try {
     if (accion === "aceptar") {
-      if (e.paused) await chrome.downloads.resume(id);
-    } else if (accion === "eliminar" || (accion === "cerrar" && e.paused)) {
+      if (e.state === "in_progress" && e.paused) await chrome.downloads.resume(id);
+    } else if (accion === "eliminar" || (accion === "cerrar" && e.state === "in_progress" && e.paused)) {
       if (e.state === "complete") await chrome.downloads.removeFile(id);
       else await chrome.downloads.cancel(id);
     }
@@ -116,12 +126,13 @@ async function aplicarDecision(id, accion) {
     log(id, "no se pudo aplicar la decisión", { mensaje: err.message });
   }
 }
+
 async function sha256Hex(buffer) {
   const hash = await crypto.subtle.digest("SHA-256", buffer);
   return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-
+// Pide el archivo, consulta la caché de la API y, si no la conoce, lo sube para escanearlo
 async function escanearConApi(url, ctx) {
   const resp = await fetch(url, { credentials: "include", signal: AbortSignal.timeout(TIMEOUT_DESCARGA_MS) });
   if (!resp.ok) throw new Error(`fetch ${resp.status}`);
@@ -129,40 +140,50 @@ async function escanearConApi(url, ctx) {
   const buffer = await resp.arrayBuffer();
   if (buffer.byteLength > MAX_BYTES) return { verdict: "excede_tamano" };
 
+  const hash = await sha256Hex(buffer);
+  const consulta = new URLSearchParams({
+    filename: ctx.filename,
+    mime: ctx.mime || "",
+    source_domain: ctx.source_domain,
+    scan_mode: ctx.scan_mode || "principal",
+  });
+  const c = await fetch(`${API_URL}/verdicts/${hash}?${consulta}`, { signal: AbortSignal.timeout(TIMEOUT_API_MS) });
+  if (c.ok) return c.json();
+  if (c.status !== 404) throw new Error(`API ${c.status}`);
+
   const form = new FormData();
   form.append("file", new Blob([buffer]), ctx.filename);
-  form.append("sha256", await sha256Hex(buffer));
+  form.append("sha256", hash);
   form.append("filename", ctx.filename);
   form.append("extension", ctx.extension);
   form.append("mime", ctx.mime || "");
   form.append("source_domain", ctx.source_domain);
   form.append("scan_mode", ctx.scan_mode || "principal");
 
-  const r = await fetch(`${API_URL}/scan`, { method: "POST", body: form, signal: AbortSignal.timeout(TIMEOUT_MS)});
+  const r = await fetch(`${API_URL}/scan`, { method: "POST", body: form, signal: AbortSignal.timeout(TIMEOUT_API_MS) });
   if (!r.ok) throw new Error(`API ${r.status}`);
   return r.json();
 }
 
-//reintento en casi de falle una vez el escaneo
+// Un reintento; si vuelve a fallar, el veredicto es "error"
 async function escanear(id, url, ctx) {
-  for (let intento = 1; intento <= 2; intento++){
+  for (let intento = 1; intento <= 2; intento++) {
     try {
       return await escanearConApi(url, ctx);
     } catch (e) {
-      log(id, `escaneo fallo(intento ${intento})`, {mensaje: e.message});
+      log(id, `escaneo falló (intento ${intento})`, { mensaje: e.message });
     }
   }
   return { verdict: "error" };
 }
 
-
+// Mantiene vivo el service worker mientras dura la promesa
 async function conPulso(promesa) {
   const pulso = setInterval(() => chrome.runtime.getPlatformInfo(), 20000);
   try {
     return await promesa;
-  } finally{
-   clearInterval(pulso);
-
+  } finally {
+    clearInterval(pulso);
   }
 }
 
@@ -172,38 +193,14 @@ async function escanearYAplicar(id, url, ctx) {
   await aplicarVeredicto(id, r, ctx);
 }
 
-
-// constantes para el plan B
-
-
-async function estado(id) {
-  const [d] = await chrome.downloads.search({ id });
-  if (!d) return null;
-  return {
-    state: d.state,
-    paused: d.paused,
-    bytesReceived: d.bytesReceived,
-    totalBytes: d.totalBytes,
-    canResume: d.canResume,
-    error: d.error,
-  };
-}
-
-
-chrome.downloads.onCreated.addListener(async (item) => {
-  const url = item.finalUrl || item.url || "";
-  if (!/^https?:\/\//i.test(url)) {
-    await Promise.race([d.nombreListo, esperar(ESPERA_NOMBRE_MS)]);
-    await mostrarAviso(id, { verdict: "no_escaneable", matches: [] }, { filename: nombreBase(d.filename) || "archivo" });
-    return;
-  }
-  if (item.byExtensionId) {
-    return;
-  }
-  if (item.startTime && Date.now() - new Date(item.startTime).getTime() > 15000) {
-    return;
-  }
+async function procesarDescarga(item) {
   const id = item.id;
+  const url = item.finalUrl || item.url || "";
+  if (item.byExtensionId) return;
+  if (item.startTime && Date.now() - new Date(item.startTime).getTime() > 15000) return;
+  const esBlobData = /^(blob|data):/i.test(url);
+  if (!esBlobData && !/^https?:\/\//i.test(url)) return;
+
   const d = {
     inicio: Date.now(),
     modo: "principal",
@@ -227,7 +224,14 @@ chrome.downloads.onCreated.addListener(async (item) => {
     totalBytes: item.totalBytes,
   });
 
-
+  // blob: y data: no se pueden volver a pedir con fetch -> no escaneables
+  if (esBlobData) {
+    d.modo = "no_escaneable_blob_data";
+    log(id, "NO ESCANEABLE: URL blob:/data:. No se pausa; la descarga sigue normal");
+    await Promise.race([d.nombreListo, esperar(ESPERA_NOMBRE_MS)]);
+    await mostrarAviso(id, { verdict: "no_escaneable", matches: [] }, { filename: nombreBase(d.filename) || "archivo" });
+    return;
+  }
 
   // el tamaño ya se conoce en onCreated -> si excede el máximo, ni se pausa
   if (item.totalBytes > MAX_BYTES) {
@@ -250,7 +254,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
     log(id, "pause lanzó error", { mensaje: e.message });
   }
 
-  //pause() no falla aunque llegue tarde; se revisa el estado real
+  // pause() no falla aunque llegue tarde; se revisa el estado real
   const e1 = await estado(id);
   log(id, "estado tras pausar", e1);
   const llegoTarde =
@@ -260,7 +264,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
 
   if (!pausada || llegoTarde) {
     d.modo = "degradado";
-    log(id, "MODO DEGRADADO: la pausa llegó tarde. Se espera a que termine");
+    log(id, "MODO DEGRADADO: la pausa llegó tarde");
     await Promise.race([d.nombreListo, esperar(ESPERA_NOMBRE_MS)]);
     await escanearYAplicar(id, item.url, contextoDe(item.url, d));
     return;
@@ -275,31 +279,30 @@ chrome.downloads.onCreated.addListener(async (item) => {
     mime: d.mime,
     source_domain: dominioDe(item.url),
     fuente_nombre: d.filename ? "chrome" : "url",
-    scan_mode : "principal"
+    scan_mode: "principal",
   };
   log(id, "contexto que se mandaría a la API", contexto);
-
 
   let resultado = null;
   d.reteniendo = true;
   const terminoAntes = await Promise.race([
-      conPulso(escanear(id, item.url, contexto)).then((r) => {
-        resultado = r;
-        return false;
-      }),
-      d.terminada.then(() => true),
+    conPulso(escanear(id, item.url, contexto)).then((r) => {
+      resultado = r;
+      return false;
+    }),
+    d.terminada.then(() => true),
   ]);
   d.reteniendo = false;
 
   if (terminoAntes) {
-    // La pausa no retuvo la descarga (por ejemplo, salió del caché): se trata como modo degradado
+    // La pausa no retuvo la descarga: se trata como modo degradado
     await escanearYAplicar(id, item.url, contextoDe(item.url, d));
     return;
   }
   log(id, "respuesta de la API", resultado);
   const veredicto = resultado.verdict;
   await aplicarVeredicto(id, resultado, contexto);
-  if (["peligroso", "sospechoso", "error", "excede_tamano"].includes(veredicto)) return;
+  if (["peligroso", "sospechoso", "error", "excede_tamano"].includes(veredicto)) return; // espera la decisión o no se reanuda
   const e2 = await estado(id);
   log(id, "estado antes de reanudar", e2);
   try {
@@ -307,6 +310,26 @@ chrome.downloads.onCreated.addListener(async (item) => {
     log(id, "resume OK");
   } catch (e) {
     log(id, "resume FALLÓ", { mensaje: e.message });
+  }
+}
+
+// Red de seguridad: ante un fallo inesperado, el usuario ve el aviso de "no se pudo escanear"
+async function fallar(item) {
+  const d = descargas.get(item.id);
+  const filename = (d && nombreBase(d.filename)) || nombreBase(item.url || "") || "archivo";
+  try {
+    await mostrarAviso(item.id, { verdict: "error", matches: [] }, { filename });
+  } catch (e) {
+    console.error(`[#${item.id}] no se pudo mostrar el aviso de error`, e);
+  }
+}
+
+chrome.downloads.onCreated.addListener(async (item) => {
+  try {
+    await procesarDescarga(item);
+  } catch (e) {
+    console.error(`[#${item.id}] fallo inesperado`, e);
+    await fallar(item);
   }
 });
 
@@ -340,7 +363,6 @@ chrome.downloads.onChanged.addListener((delta) => {
     });
   }
 });
-
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.tipo === "decision") aplicarDecision(msg.id, msg.accion);
