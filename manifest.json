@@ -1,13 +1,15 @@
 {
   "manifest_version" : 3,
   "name" : "Prototipe-Security-yara",
-  "version" : "1.0.0",
-  "description": "Prototipo de extensio, sirve de prueba :I",
+  "version" : "0.1.0",
+  "description": "Analiza con reglas Yara los archivos que descargas.",
+  "permissions": ["downloads", "storage"],
   "icons" : {
     "16" : "images/ico_16.png",
     "32" : "images/ico_32.png"
   },
-  "permissions": [
-      "downloads"
-  ]
+  "host_permissions":["<all_urls>"],
+  "background" : {
+   "service_worker" : "background.js"
+  }
 }
