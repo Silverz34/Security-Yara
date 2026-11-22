@@ -1,3 +1,5 @@
+import { MAX_BYTES } from "../shared/config.js";
+
 const id = Number(new URLSearchParams(location.search).get("id"));
 const clave = `pend:${id}`;
 
@@ -16,7 +18,7 @@ const TEXTOS = {
   },
   excede_tamano: {
     titulo: "Archivo demasiado grande para escanear",
-    resumen: "Este archivo supera el límite de 25 MB, así que no se analizó. No sabemos si es seguro.",
+    resumen: `Este archivo supera el límite de ${MAX_BYTES / 1024 / 1024} MB, así que no se analizó. No sabemos si es seguro.`,
   },
   no_escaneable: {
     titulo: "Este tipo de descarga no se puede escanear",
@@ -31,7 +33,7 @@ async function iniciar() {
     window.close();
     return;
   }
-  const t = TEXTOS[pend.verdict];
+  const t = TEXTOS[pend.verdict] || TEXTOS.error;
   document.body.className = pend.verdict;
   document.getElementById("titulo").textContent = t.titulo;
   document.getElementById("archivo").textContent = pend.filename;

@@ -1,0 +1,14 @@
+body { padding: 16px; line-height: 1.4; overflow-y: auto; }
+h1 { font-size: 1.2rem; margin: 0 0 4px; }
+#archivo { font-family: monospace; color: var(--texto-suave); overflow-wrap: anywhere; margin: 0 0 12px; }
+ul { padding-left: 18px; }
+li p { margin: 2px 0 8px; color: var(--texto-suave); }
+#botones { display: flex; gap: 8px; margin-top: 16px; }
+button {
+  padding: 8px 16px; font: inherit; cursor: pointer; border-radius: 8px;
+  border: 1px solid var(--linea); background: var(--tarjeta); color: var(--texto);
+}
+button:hover { border-color: var(--morado); }
+.sospechoso h1 { color: var(--sospechoso); }
+.peligroso h1 { color: var(--peligroso); }
+.error h1, .excede_tamano h1, .no_escaneable h1 { color: var(--texto-suave); }

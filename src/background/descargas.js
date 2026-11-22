@@ -1,37 +1,13 @@
-const MAX_BYTES = 25 * 1024 * 1024; // tamaño máximo a escanear (25 MB)
-const ESPERA_NOMBRE_MS = 500;       // tiempo máximo para esperar el filename final
-const TIMEOUT_DESCARGA_MS = 60000;  // tiempo máximo para pedir el archivo a su sitio de origen
-const TIMEOUT_API_MS = 20000;       // tiempo máximo de cada llamada a la API
-const API_URL = "http://127.0.0.1:8000";
+// Flujo de cada descarga: pausar, escanear, aplicar el veredicto y reanudar.
+import { MAX_BYTES, TIMEOUT_DESCARGA_MS } from "../shared/config.js";
+import { consultarCache, subirEscaneo } from "../shared/api.js";
+import { descargas, log } from "./registro.js";
+import { esperar, nombreBase, extensionDe, dominioDe, sha256Hex, estado } from "./util.js";
+import { aplicarVeredicto, mostrarAviso } from "./avisos.js";
 
-const descargas = new Map();
-const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
+const ESPERA_NOMBRE_MS = 500; // tiempo máximo para esperar el filename final
 
-const BOTONES = {
-  sospechoso: ["aceptar", "eliminar"],
-  error: ["aceptar", "eliminar"],
-  excede_tamano: ["aceptar", "eliminar"],
-  no_escaneable: ["aceptar", "eliminar"],
-  peligroso: ["entendido"],
-};
-
-function log(id, mensaje, datos) {
-  const d = descargas.get(id);
-  const ms = d ? Date.now() - d.inicio : 0;
-  console.log(`[#${id} +${ms}ms] ${mensaje}` + (datos ? " " + JSON.stringify(datos) : ""));
-}
-
-const nombreBase = (ruta) => (ruta || "").split(/[\\/]/).pop();
-
-function extensionDe(nombre) {
-  const i = nombre.lastIndexOf(".");
-  return i > 0 ? nombre.slice(i + 1).toLowerCase() : "";
-}
-
-function dominioDe(url) {
-  try { return new URL(url).hostname; } catch { return ""; }
-}
-
+// Contexto para los caminos de modo degradado
 function contextoDe(url, d) {
   let nombreUrl = "";
   try {
@@ -39,97 +15,6 @@ function contextoDe(url, d) {
   } catch { }
   const nombre = (nombreBase(d.filename) || nombreUrl || "archivo").slice(0, 120);
   return { filename: nombre, extension: extensionDe(nombre), mime: d.mime, source_domain: dominioDe(url), scan_mode: "degradado" };
-}
-
-async function estado(id) {
-  const [d] = await chrome.downloads.search({ id });
-  if (!d) return null;
-  return {
-    state: d.state,
-    paused: d.paused,
-    bytesReceived: d.bytesReceived,
-    totalBytes: d.totalBytes,
-    canResume: d.canResume,
-    error: d.error,
-  };
-}
-
-async function borrarPeligroso(id, ctx) {
-  const antes = await estado(id);
-  try {
-    if (antes && antes.state === "in_progress") {
-      await chrome.downloads.cancel(id);
-      log(id, "cancel OK (descarga en curso descartada)");
-      return true;
-    }
-    if (antes && antes.state === "complete") {
-      await chrome.downloads.removeFile(id);
-      log(id, "removeFile OK");
-      return true;
-    }
-    log(id, "estado no esperado, no se borró", antes);
-  } catch (e) {
-    log(id, "NO SE PUDO BORRAR", { mensaje: e.message });
-  }
-  return false;
-}
-
-async function aplicarVeredicto(id, r, ctx) {
-  log(id, "veredicto", { veredicto: r.verdict });
-  if (r.verdict === "peligroso") {
-    if (await borrarPeligroso(id, ctx)) await mostrarAviso(id, r, ctx);
-  } else if (["sospechoso", "error", "excede_tamano"].includes(r.verdict)) {
-    await mostrarAviso(id, r, ctx);
-  }
-}
-
-async function mostrarAviso(id, r, ctx) {
-  const clave = `pend:${id}`;
-  const existente = await chrome.storage.session.get(clave);
-  if (existente[clave]) return;
-  const pendiente = {
-    id,
-    verdict: r.verdict,
-    matches: r.matches || [],
-    filename: ctx.filename,
-    botones: BOTONES[r.verdict],
-  };
-  await chrome.storage.session.set({ [clave]: pendiente });
-  const ventana = await chrome.windows.create({
-    url: chrome.runtime.getURL(`aviso.html?id=${id}`),
-    type: "popup",
-    width: 480,
-    height: 600,
-  });
-  await chrome.storage.session.set({ [clave]: { ...pendiente, windowId: ventana.id } });
-}
-
-// accion: "aceptar" | "eliminar" | "entendido" | "cerrar" (cerrar la ventana con la X)
-async function aplicarDecision(id, accion) {
-  const clave = `pend:${id}`;
-  const { [clave]: pend } = await chrome.storage.session.get(clave);
-  if (!pend) return;
-  await chrome.storage.session.remove(clave);
-  if (pend.windowId) chrome.windows.remove(pend.windowId).catch(() => {});
-  log(id, "decisión del usuario", { accion });
-
-  const e = await estado(id);
-  if (!e) return;
-  try {
-    if (accion === "aceptar") {
-      if (e.state === "in_progress" && e.paused) await chrome.downloads.resume(id);
-    } else if (accion === "eliminar" || (accion === "cerrar" && e.state === "in_progress" && e.paused)) {
-      if (e.state === "complete") await chrome.downloads.removeFile(id);
-      else await chrome.downloads.cancel(id);
-    }
-  } catch (err) {
-    log(id, "no se pudo aplicar la decisión", { mensaje: err.message });
-  }
-}
-
-async function sha256Hex(buffer) {
-  const hash = await crypto.subtle.digest("SHA-256", buffer);
-  return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 // Pide el archivo, consulta la caché de la API y, si no la conoce, lo sube para escanearlo
@@ -141,28 +26,7 @@ async function escanearConApi(url, ctx) {
   if (buffer.byteLength > MAX_BYTES) return { verdict: "excede_tamano" };
 
   const hash = await sha256Hex(buffer);
-  const consulta = new URLSearchParams({
-    filename: ctx.filename,
-    mime: ctx.mime || "",
-    source_domain: ctx.source_domain,
-    scan_mode: ctx.scan_mode || "principal",
-  });
-  const c = await fetch(`${API_URL}/verdicts/${hash}?${consulta}`, { signal: AbortSignal.timeout(TIMEOUT_API_MS) });
-  if (c.ok) return c.json();
-  if (c.status !== 404) throw new Error(`API ${c.status}`);
-
-  const form = new FormData();
-  form.append("file", new Blob([buffer]), ctx.filename);
-  form.append("sha256", hash);
-  form.append("filename", ctx.filename);
-  form.append("extension", ctx.extension);
-  form.append("mime", ctx.mime || "");
-  form.append("source_domain", ctx.source_domain);
-  form.append("scan_mode", ctx.scan_mode || "principal");
-
-  const r = await fetch(`${API_URL}/scan`, { method: "POST", body: form, signal: AbortSignal.timeout(TIMEOUT_API_MS) });
-  if (!r.ok) throw new Error(`API ${r.status}`);
-  return r.json();
+  return (await consultarCache(hash, ctx)) ?? (await subirEscaneo(hash, buffer, ctx));
 }
 
 // Un reintento; si vuelve a fallar, el veredicto es "error"
@@ -193,7 +57,7 @@ async function escanearYAplicar(id, url, ctx) {
   await aplicarVeredicto(id, r, ctx);
 }
 
-async function procesarDescarga(item) {
+export async function procesarDescarga(item) {
   const id = item.id;
   const url = item.finalUrl || item.url || "";
   if (item.byExtensionId) return;
@@ -314,7 +178,7 @@ async function procesarDescarga(item) {
 }
 
 // Red de seguridad: ante un fallo inesperado, el usuario ve el aviso de "no se pudo escanear"
-async function fallar(item) {
+export async function fallar(item) {
   const d = descargas.get(item.id);
   const filename = (d && nombreBase(d.filename)) || nombreBase(item.url || "") || "archivo";
   try {
@@ -324,16 +188,8 @@ async function fallar(item) {
   }
 }
 
-chrome.downloads.onCreated.addListener(async (item) => {
-  try {
-    await procesarDescarga(item);
-  } catch (e) {
-    console.error(`[#${item.id}] fallo inesperado`, e);
-    await fallar(item);
-  }
-});
-
-chrome.downloads.onChanged.addListener((delta) => {
+// Mantiene al día el nombre, el tipo y el fin de cada descarga
+export function alCambiarDescarga(delta) {
   const id = delta.id;
   const d = descargas.get(id);
   const cambios = {};
@@ -362,15 +218,4 @@ chrome.downloads.onChanged.addListener((delta) => {
       duracion_ms: Date.now() - d.inicio,
     });
   }
-});
-
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg && msg.tipo === "decision") aplicarDecision(msg.id, msg.accion);
-});
-
-chrome.windows.onRemoved.addListener(async (windowId) => {
-  const todo = await chrome.storage.session.get(null);
-  for (const [clave, pend] of Object.entries(todo)) {
-    if (clave.startsWith("pend:") && pend.windowId === windowId) aplicarDecision(pend.id, "cerrar");
-  }
-});
+}

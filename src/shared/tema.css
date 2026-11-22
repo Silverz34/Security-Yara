@@ -1,0 +1,21 @@
+/* Colores y base común de las ventanas de la extensión. Cambia los hex aquí. */
+:root {
+  --fondo: #262626;
+  --tarjeta: #1b1b1b;
+  --texto: #f2f2f2;
+  --texto-suave: #b8b8b8;
+  --linea: #3d3d3d;
+  --morado: #9b51e0;
+  --morado-fondo: #3b2557;
+  --peligroso: #e5484d;
+  --sospechoso: #f5a524;
+  --arco-fondo: #4a4a4a;
+  --barra: #b9b9c7;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  font-family: system-ui, sans-serif;
+  color: var(--texto);
+  background: var(--fondo);
+}
