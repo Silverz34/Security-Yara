@@ -1,15 +1,24 @@
 {
-  "manifest_version" : 3,
-  "name" : "Prototipe-Security-yara",
-  "version" : "0.1.0",
-  "description": "Analiza con reglas Yara los archivos que descargas.",
-  "permissions": ["downloads", "storage"],
-  "icons" : {
-    "16" : "images/ico_16.png",
-    "32" : "images/ico_32.png"
+  "manifest_version": 3,
+  "name": "SecureYara",
+  "version": "0.1.0",
+  "description": "Analiza con reglas YARA los archivos que descargas.",
+  "icons": {
+    "16": "images/ico_16.png",
+    "32": "images/ico_32.png"
   },
-  "host_permissions":["<all_urls>"],
-  "background" : {
-   "service_worker" : "background.js"
+  "permissions": ["downloads", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "src/background/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "SecureYara",
+    "default_popup": "src/popup/popup.html",
+    "default_icon": {
+      "16": "images/ico_16.png",
+      "32": "images/ico_32.png"
+    }
   }
 }

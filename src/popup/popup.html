@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>SecureYara</title>
+  <link rel="stylesheet" href="../shared/tema.css">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>SecureYara</h1>
+  <p id="mensaje">Cargando…</p>
+  <section id="contenido" hidden>
+    <div class="tarjeta">
+      <div class="cifras">
+        <div class="cifra peligroso"><span>Peligroso</span><strong id="n-peligroso">0</strong></div>
+        <div class="cifra sospechoso"><span>Sospechoso</span><strong id="n-sospechoso">0</strong></div>
+      </div>
+      <div class="arco">
+        <svg viewBox="0 0 180 100" aria-hidden="true">
+          <path id="arco-fondo" d="M 20 90 A 70 70 0 0 1 160 90" />
+          <path id="arco-peligroso" d="M 20 90 A 70 70 0 0 1 160 90" stroke-dasharray="0 220" />
+          <path id="arco-sospechoso" d="M 20 90 A 70 70 0 0 1 160 90" stroke-dasharray="0 220" />
+        </svg>
+        <div class="centro"><strong id="total">0</strong><span>Escaneados</span></div>
+      </div>
+    </div>
+    <h2>Tipo de amenaza detectada</h2>
+    <div id="categorias"></div>
+  </section>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
