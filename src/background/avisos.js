@@ -1,9 +1,7 @@
-// Notificaciones nativas y decisiones del usuario.
-import { MAX_BYTES } from "../shared/config.js";
+// Ventanas de aviso y decisiones del usuario.
 import { log } from "./registro.js";
 import { estado } from "./util.js";
 
-const PREFIJO_NOTIF = "sy_aviso_";
 const ACCIONES = ["aceptar", "eliminar", "entendido", "cerrar"];
 
 const BOTONES = {
@@ -13,60 +11,6 @@ const BOTONES = {
   no_escaneable: ["aceptar", "eliminar"],
   peligroso: ["entendido"],
 };
-
-const ETIQUETAS = {
-  aceptar: "Aceptar",
-  eliminar: "Eliminar",
-  entendido: "Entendido",
-};
-
-function acortar(texto, max = 36) {
-  if (!texto || texto.length <= max) return texto || "archivo";
-  return `${texto.slice(0, max - 1)}…`;
-}
-
-function construirNotificacion(verdict, filename, matches = []) {
-  const archivo = acortar(filename);
-  const hallazgos = matches
-    .filter((x) => x.severity !== "low" && x.title_es)
-    .map((x) => x.title_es);
-  const detalleReglas = hallazgos.length ? ` (${hallazgos.slice(0, 2).join(", ")})` : "";
-
-  switch (verdict) {
-    case "sospechoso":
-      return {
-        title: "Archivo sospechoso",
-        message: `${archivo}: señales de riesgo${detalleReglas}. Elige si deseas aceptarlo o eliminarlo.`,
-      };
-    case "peligroso":
-      return {
-        title: "Archivo peligroso eliminado",
-        message: `${archivo}: amenaza detectada${detalleReglas}. SecureYara lo eliminó para protegerte.`,
-      };
-    case "excede_tamano":
-      return {
-        title: "Archivo demasiado grande",
-        message: `${archivo} supera el límite de ${MAX_BYTES / 1024 / 1024} MB y no se analizó. No sabemos si es seguro.`,
-      };
-    case "no_escaneable":
-      return {
-        title: "Descarga no escaneable",
-        message: `${archivo} proviene de blob:/data: y no puede re-descargarse para análisis. No sabemos si es seguro.`,
-      };
-    case "error":
-    default:
-      return {
-        title: "No se pudo escanear",
-        message: `Falló el análisis de ${archivo} tras reintentar. No sabemos si es seguro.`,
-      };
-  }
-}
-
-function idDesdeNotif(notifId) {
-  if (typeof notifId !== "string" || !notifId.startsWith(PREFIJO_NOTIF)) return null;
-  const id = Number(notifId.slice(PREFIJO_NOTIF.length));
-  return Number.isInteger(id) ? id : null;
-}
 
 async function borrarPeligroso(id) {
   const antes = await estado(id);
@@ -101,38 +45,31 @@ export async function mostrarAviso(id, r, ctx) {
   const clave = `pend:${id}`;
   const existente = await chrome.storage.session.get(clave);
   if (existente[clave]) return;
-
-  const botones = BOTONES[r.verdict] ?? BOTONES.error;
   const pendiente = {
     id,
     verdict: r.verdict,
     matches: r.matches || [],
     filename: ctx.filename,
-    botones,
+    botones: BOTONES[r.verdict] ?? BOTONES.error,
   };
   await chrome.storage.session.set({ [clave]: pendiente });
-
-  const { title, message } = construirNotificacion(r.verdict, ctx.filename, r.matches);
-  await chrome.notifications.create(`${PREFIJO_NOTIF}${id}`, {
-    type: "basic",
-    iconUrl: chrome.runtime.getURL("images/ico_32.png"),
-    title,
-    message,
-    priority: 2,
-    requireInteraction: true,
-    buttons: botones.map((accion) => ({ title: ETIQUETAS[accion] })),
+  const ventana = await chrome.windows.create({
+    url: chrome.runtime.getURL(`src/aviso/aviso.html?id=${id}`),
+    type: "popup",
+    width: 480,
+    height: 600,
   });
+  await chrome.storage.session.set({ [clave]: { ...pendiente, windowId: ventana.id } });
 }
 
-// accion: "aceptar" | "eliminar" | "entendido" | "cerrar" (cerrar la notificación con la X)
+// accion: "aceptar" | "eliminar" | "entendido" | "cerrar" (cerrar la ventana con la X)
 export async function aplicarDecision(id, accion) {
   if (!Number.isInteger(id) || !ACCIONES.includes(accion)) return;
   const clave = `pend:${id}`;
   const { [clave]: pend } = await chrome.storage.session.get(clave);
   if (!pend) return;
-
   await chrome.storage.session.remove(clave);
-  chrome.notifications.clear(`${PREFIJO_NOTIF}${id}`).catch(() => {});
+  if (pend.windowId) chrome.windows.remove(pend.windowId).catch(() => {});
   log(id, "decisión del usuario", { accion });
 
   const e = await estado(id);
@@ -149,19 +86,10 @@ export async function aplicarDecision(id, accion) {
   }
 }
 
-// Mapea el índice del botón presionado a la acción guardada en pend.botones
-export async function alClicBotonNotificacion(notifId, buttonIndex) {
-  const id = idDesdeNotif(notifId);
-  if (id === null) return;
-  const { [`pend:${id}`]: pend } = await chrome.storage.session.get(`pend:${id}`);
-  if (!pend) return;
-  const accion = pend.botones[buttonIndex];
-  if (accion) await aplicarDecision(id, accion);
-}
-
-// Cerrar la notificación manualmente cuenta como decisión "cerrar"
-export async function alCerrarNotificacion(notifId, byUser) {
-  if (!byUser) return;
-  const id = idDesdeNotif(notifId);
-  if (id !== null) await aplicarDecision(id, "cerrar");
+// Cerrar la ventana con la X cuenta como decisión "cerrar"
+export async function alCerrarVentana(windowId) {
+  const todo = await chrome.storage.session.get(null);
+  for (const [clave, pend] of Object.entries(todo)) {
+    if (clave.startsWith("pend:") && pend.windowId === windowId) aplicarDecision(pend.id, "cerrar");
+  }
 }
