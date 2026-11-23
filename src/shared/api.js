@@ -34,15 +34,18 @@ function validarResultado(r) {
   return r;
 }
 
-// Devuelve el resultado guardado o null si la API no conoce el caso
 export async function consultarCache(hash, ctx) {
-  const consulta = new URLSearchParams({
-    filename: ctx.filename,
-    mime: ctx.mime || "",
-    source_domain: ctx.source_domain,
-    scan_mode: ctx.scan_mode || "principal",
+  const r = await llamar("/verdicts/lookup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sha256: hash,
+      filename: ctx.filename,
+      mime: ctx.mime || "",
+      source_domain: ctx.source_domain || "",
+      scan_mode: ctx.scan_mode || "principal",
+    }),
   });
-  const r = await llamar(`/verdicts/${hash}?${consulta}`);
   if (r.status === 404) return null;
   if (!r.ok) throw new Error(`API ${r.status}`);
   return validarResultado(await r.json());

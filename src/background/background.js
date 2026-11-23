@@ -1,5 +1,4 @@
-// Punto de entrada del service worker: solo registra los eventos.
-// La lógica vive en descargas.js y avisos.js.
+
 import { procesarDescarga, fallar, alCambiarDescarga } from "./descargas.js";
 import { aplicarDecision, alCerrarVentana } from "./avisos.js";
 
