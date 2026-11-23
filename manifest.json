@@ -7,7 +7,7 @@
     "16": "images/ico_16.png",
     "32": "images/ico_32.png"
   },
-  "permissions": ["downloads", "storage"],
+  "permissions": ["downloads", "storage","notifications"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "src/background/background.js",
