@@ -1,9 +1,9 @@
 // Todo lo que sale hacia la API pasa por este módulo.
 import { API_URL, TIMEOUT_API_MS } from "./config.js";
-
+import { API_KEY } from "./clave.js";
 const VEREDICTOS = ["limpio", "sospechoso", "peligroso"];
 
-// Fuera de localhost solo se permite HTTPS: se envía el contenido de los archivos
+
 function validarDestino() {
   const u = new URL(API_URL);
   const local = ["127.0.0.1", "localhost"].includes(u.hostname);
@@ -12,11 +12,20 @@ function validarDestino() {
   }
 }
 
-function llamar(ruta, opciones = {}) {
+async function llamar(ruta, opciones = {}) {
   validarDestino();
-  return fetch(`${API_URL}${ruta}`, { ...opciones, signal: AbortSignal.timeout(TIMEOUT_API_MS) });
+  const headers = new Headers(opciones.headers);
+  if (API_KEY) headers.set("X-API-Key", API_KEY);
+  const r = await fetch(`${API_URL}${ruta}`, {
+    ...opciones,
+    headers,
+    signal: AbortSignal.timeout(TIMEOUT_API_MS),
+  });
+  if (r.status === 401) {
+    console.error("La API rechazó la clave (401): revisa src/shared/clave.js");
+  }
+  return r;
 }
-
 // No se confía a ciegas en lo que responde la API
 function validarResultado(r) {
   if (!r || !VEREDICTOS.includes(r.verdict) || !Array.isArray(r.matches)) {
