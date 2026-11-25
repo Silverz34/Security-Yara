@@ -124,7 +124,7 @@ export async function mostrarAviso(id, r, ctx) {
   });
 }
 
-// accion: "aceptar" | "eliminar" | "entendido" | "cerrar" (cerrar la notificación con la X)
+// accion: "aceptar" | "eliminar" | "entendido" | "cerrar" (incluye "Descartar" en Linux)
 export async function aplicarDecision(id, accion) {
   if (!Number.isInteger(id) || !ACCIONES.includes(accion)) return;
   const clave = `pend:${id}`;
@@ -137,12 +137,22 @@ export async function aplicarDecision(id, accion) {
 
   const e = await estado(id);
   if (!e) return;
+
+  const debeEliminar =
+    accion === "eliminar" ||
+    (accion === "cerrar" && pend.botones.includes("eliminar"));
+
   try {
     if (accion === "aceptar") {
       if (e.state === "in_progress" && e.paused) await chrome.downloads.resume(id);
-    } else if (accion === "eliminar" || (accion === "cerrar" && e.state === "in_progress" && e.paused)) {
-      if (e.state === "complete") await chrome.downloads.removeFile(id);
-      else await chrome.downloads.cancel(id);
+    } else if (debeEliminar) {
+      if (e.state === "complete") {
+        await chrome.downloads.removeFile(id);
+        log(id, "removeFile OK tras descartar");
+      } else if (e.state === "in_progress") {
+        await chrome.downloads.cancel(id);
+        log(id, "cancel OK tras descartar");
+      }
     }
   } catch (err) {
     log(id, "no se pudo aplicar la decisión", { mensaje: err.message });
