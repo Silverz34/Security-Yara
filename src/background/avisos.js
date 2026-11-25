@@ -124,38 +124,48 @@ export async function mostrarAviso(id, r, ctx) {
   });
 }
 
+const botonesPulsados = new Set();
+const decisionesEnCurso = new Set();
+
 // accion: "aceptar" | "eliminar" | "entendido" | "cerrar" (incluye "Descartar" en Linux)
 export async function aplicarDecision(id, accion) {
   if (!Number.isInteger(id) || !ACCIONES.includes(accion)) return;
-  const clave = `pend:${id}`;
-  const { [clave]: pend } = await chrome.storage.session.get(clave);
-  if (!pend) return;
-
-  await chrome.storage.session.remove(clave);
-  chrome.notifications.clear(`${PREFIJO_NOTIF}${id}`).catch(() => {});
-  log(id, "decisión del usuario", { accion });
-
-  const e = await estado(id);
-  if (!e) return;
-
-  const debeEliminar =
-    accion === "eliminar" ||
-    (accion === "cerrar" && pend.botones.includes("eliminar"));
+  if (decisionesEnCurso.has(id)) return;
+  decisionesEnCurso.add(id);
 
   try {
-    if (accion === "aceptar") {
-      if (e.state === "in_progress" && e.paused) await chrome.downloads.resume(id);
-    } else if (debeEliminar) {
-      if (e.state === "complete") {
-        await chrome.downloads.removeFile(id);
-        log(id, "removeFile OK tras descartar");
-      } else if (e.state === "in_progress") {
-        await chrome.downloads.cancel(id);
-        log(id, "cancel OK tras descartar");
+    const clave = `pend:${id}`;
+    const { [clave]: pend } = await chrome.storage.session.get(clave);
+    if (!pend) return;
+
+    await chrome.storage.session.remove(clave);
+    chrome.notifications.clear(`${PREFIJO_NOTIF}${id}`).catch(() => {});
+    log(id, "decisión del usuario", { accion });
+
+    const e = await estado(id);
+    if (!e) return;
+
+    const debeEliminar =
+      accion === "eliminar" ||
+      (accion === "cerrar" && pend.botones.includes("eliminar"));
+
+    try {
+      if (accion === "aceptar") {
+        if (e.state === "in_progress" && e.paused) await chrome.downloads.resume(id);
+      } else if (debeEliminar) {
+        if (e.state === "complete") {
+          await chrome.downloads.removeFile(id);
+          log(id, "removeFile OK tras descartar");
+        } else if (e.state === "in_progress") {
+          await chrome.downloads.cancel(id);
+          log(id, "cancel OK tras descartar");
+        }
       }
+    } catch (err) {
+      log(id, "no se pudo aplicar la decisión", { mensaje: err.message });
     }
-  } catch (err) {
-    log(id, "no se pudo aplicar la decisión", { mensaje: err.message });
+  } finally {
+    decisionesEnCurso.delete(id);
   }
 }
 
@@ -163,15 +173,24 @@ export async function aplicarDecision(id, accion) {
 export async function alClicBotonNotificacion(notifId, buttonIndex) {
   const id = idDesdeNotif(notifId);
   if (id === null) return;
+
+  // Marca de forma síncrona antes de cualquier await para bloquear onClosed
+  botonesPulsados.add(id);
+  setTimeout(() => botonesPulsados.delete(id), 1000);
+
   const { [`pend:${id}`]: pend } = await chrome.storage.session.get(`pend:${id}`);
   if (!pend) return;
   const accion = pend.botones[buttonIndex];
   if (accion) await aplicarDecision(id, accion);
 }
 
-// Cerrar la notificación manualmente cuenta como decisión "cerrar"
-export async function alCerrarNotificacion(notifId, byUser) {
-  if (!byUser) return;
+// Espera un breve margen por si el cierre ocurrió al pulsar "Aceptar" en KDE/D-Bus
+export async function alCerrarNotificacion(notifId) {
   const id = idDesdeNotif(notifId);
-  if (id !== null) await aplicarDecision(id, "cerrar");
+  if (id === null) return;
+
+  await new Promise((r) => setTimeout(r, 250));
+  if (botonesPulsados.has(id)) return;
+
+  await aplicarDecision(id, "cerrar");
 }
